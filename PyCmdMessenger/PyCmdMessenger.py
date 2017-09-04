@@ -292,6 +292,15 @@ class CmdMessenger:
         message_time = time.time()
 
         return cmd_name, received, message_time
+    
+    def query(self,cmd,*args, **kwargs):
+        """
+        Send a command (which may or may not have associated arguments) to an 
+        arduino using the CmdMessage protocol and check for a response.  The command and any parameters
+        should be passed as direct arguments to send.
+        """
+        self.send(cmd,*args,**kwargs)
+        return self.receive()
 
     def _treat_star_format(self,arg_format_list,args):
         """
