@@ -5,7 +5,8 @@ library.
 """
 __author__ = "Michael J. Harms"
 __date__ = "2016-05-23"
-__all__ = ["PyCmdMessenger","arduino"]
+__all__ = ["PyCmdMessenger","arduino","arduino_due"]
 
 from .PyCmdMessenger import CmdMessenger as CmdMessenger
 from .arduino import ArduinoBoard as ArduinoBoard
+from .arduino_due import ArduinoDueBoard as ArduinoDueBoard
