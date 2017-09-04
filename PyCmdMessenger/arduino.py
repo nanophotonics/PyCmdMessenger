@@ -7,9 +7,9 @@ __author__ = "Michael J. Harms"
 __date__ = "2016-05-30"
 
 import serial, time
-from __future__ import print_function
+#from __future__ import print_function
 
-class ArduinoBoard:
+class ArduinoBoard(object):
     """
     Class for connecting to an Arduino board over USB using PyCmdMessenger.  
     The board holds the serial handle (which, in turn, holds the device name,
@@ -152,7 +152,8 @@ class ArduinoBoard:
 
         if not self._is_connected:
             
-            print("Connecting to arduino on {}... ".format(self.device),end="")
+#            print("Connecting to arduino on {}... ".format(self.device),end="")
+            print("Connecting to arduino on {}... ".format(self.device))
 
             self.comm = serial.Serial()
             self.comm.port = self.device
