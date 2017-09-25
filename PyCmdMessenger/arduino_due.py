@@ -6,9 +6,9 @@ based boards. Here integers and doubles are stored as 32-bit (4-byte and) and
 ATMega based boards.
 """
 
-from arduino import ArduinoBoard
+from arduino import ArduinoBoardThreaded
 
-class ArduinoDueBoard(ArduinoBoard):
+class ArduinoDueBoard(ArduinoBoardThreaded):
 
     def __init__(self,
                  port,
