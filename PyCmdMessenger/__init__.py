@@ -5,10 +5,10 @@ library.
 """
 __author__ = "Michael J. Harms"
 __date__ = "2016-05-23"
-__all__ = ["PyCmdMessenger","arduino","arduino_due"]
+__all__ = ["PyCmdMessenger","PyCmdMessenger_threaded","arduino","arduino_due"]
 
-from .PyCmdMessenger import CmdMessenger as CmdMessenger
-from .PyCmdMessenger import CmdMessengerThreaded as CmdMessengerThreaded
-from .arduino import ArduinoBoard as ArduinoBoard
-from .arduino import ArduinoBoardThreaded as ArduinoBoardThreaded
-from .arduino_due import ArduinoDueBoard as ArduinoDueBoard
+from .PyCmdMessenger import CmdMessenger
+from .PyCmdMessenger_threaded import CmdMessengerThreaded
+from .arduino import ArduinoBoard
+from .arduino_due import ArduinoDueBoard
+

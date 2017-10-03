@@ -9,11 +9,12 @@ __author__ = "Michael J. Harms, chrisgrosse"
 __date__ = "2017-09-25"
 
 
-import re, warnings, time, struct
+import warnings, time
 from PyCmdMessenger import CmdMessenger
-from serial.threaded import Packetizer
+#from serial.threaded import Packetizer
+import threading
 
-class CmdMessengerThreaded(CmdMessenger, Packetizer):
+class CmdMessengerThreaded(CmdMessenger, threading.Thread):
     """
     Basic interface for interfacing over a serial connection to an arduino 
     using the CmdMessenger library.
@@ -60,29 +61,138 @@ class CmdMessengerThreaded(CmdMessenger, Packetizer):
             in the arduino code that initializes the CmdMessenger.  The default
             separator values match the default values as of CmdMessenger 4.0. 
         """
-        CmdMessenger.__init__(self.board_instance, commands, field_separator,
+        super(CmdMessengerThreaded, self).__init__(board_instance, commands, field_separator,
                               command_separator, escape_separator, warnings)
-        Packetizer.__init()
-        TERMINATOR = self.command_separator
+        self.serial = board_instance
+        self.daemon = True
+        self.alive = True
+        self._lock = threading.lock()
+        self.buffer = bytearray()
+        # start serial reading thread
+        self.run()
         
         
-    def connection_made(self, transport):
-        super(CmdMessengerThreaded, self).connection_made(transport)
+    def run(self):
+        error = None
+        while self.alive and self.serial.is_open:
+            try:
+                data = self.serial.read(self.serial.in_waiting or 1)
+            except serial.SerialException as e:
+                error = e
+                break
+            else:
+                if data:
+                    try:
+                        self.received_data(data)
+                    except Exception as e:
+                        error = e
+                        break
+        self.alive = False
+        self.lost_connection(error)
         
-    def connection_lost(self, exc):
-        super(CmdMessengerThreaded, self).connection_lost(exc)
+    def stop(self):
+        self.alive = False
+        if hasattr(self.serial, 'cancel_read'):
+            self.serial.cancel_read()
+        self.join(2)
+        
+    def close(self):
+        with self._lock:
+            self.stop()
+            self.serial.close()
+            
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()        
+    
+    def lost_connection(self, exc):
         raise IOError("Lost connection to Arduino!")
-        
-    def handle_packet(self, data_packet): # basically original receive method
+        raise exc
+    
+    def write(self, data):
+        with self._lock:
+            self.serial.write(data)            
+    
+    
+    def send(self,cmd,*args,**kwargs):
         """
-        Basically original receive method. However, different commands are
-        separated by Packetizer.data_received() method already
+        Send a command (which may or may not have associated arguments) to an 
+        arduino using the CmdMessage protocol.  The command and any parameters
+        should be passed as direct arguments to send.  
+
+        arg_formats can be passed as a keyword argument. arg_formats is an
+        optional string that specifies the formats to use for each argument
+        when passed to the arduino. If specified here, arg_formats supercedes
+        formats specified on initialization.  
+        """
+
+        # Turn the command into an integer.
+        try:
+            command_as_int = self._cmd_name_to_int[cmd]
+        except KeyError:
+            err = "Command '{}' not recognized.\n".format(cmd)
+            raise ValueError(err)
+
+        # Grab arg_formats from kwargs
+        arg_formats = kwargs.pop('arg_formats', None)
+        if kwargs:
+            raise TypeError("'send()' got unexpected keyword arguments: {}".format(', '.join(kwargs.keys())))
+
+        # Figure out what formats to use for each argument.  
+        arg_format_list = []
+        if arg_formats != None:
+
+            # The user specified formats
+            arg_format_list = list(arg_formats)
+
+        else:
+            try:
+                # See if class was initialized with a format for arguments to this
+                # command
+                arg_format_list = self._cmd_name_to_format[cmd]
+            except KeyError:
+                # if not, guess for all arguments
+                arg_format_list = ["g" for i in range(len(args))]
+  
+        # Deal with "*" format  
+        arg_format_list = self._treat_star_format(arg_format_list,args)
+
+        if len(args) > 0:
+            if len(arg_format_list) != len(args):
+                err = "Number of argument formats must match the number of arguments."
+                raise ValueError(err)
+
+        # Go through each argument and create a bytes representation in the
+        # proper format to send.  Escape appropriate characters. 
+        fields = ["{}".format(command_as_int).encode("ascii")]
+        for i, a in enumerate(args):
+            fields.append(self._send_methods[arg_format_list[i]](a))
+            fields[-1] = self._escape_re.sub(self._byte_escape_sep + r"\1".encode("ascii"),fields[-1])
+
+        # Make something that looks like cmd,field1,field2,field3;
+        compiled_bytes = self._byte_field_sep.join(fields) + self._byte_command_sep
+
+        # Send the message. 
+        # Only part in this function that has changed to use new thread safe write() function
+        self.write(compiled_bytes)    
+    
+    
+    def received_data(self, data):
+        """Buffer received data, find self.command_separator, call received_command"""
+        self.buffer.extend(data)
+        while self.command_separator in self.buffer:
+            command, self.buffer = self.buffer.split(self.command_separator, 1)
+            self.received_command(command)
+        
+    def received_command(self, command): 
+        """
+        Basically original receive() method. However, different commands are
+        separated by received_data() method already
         """
         msg = [[]]
         raw_msg = []
         escaped = False
 #        command_sep_found = False
-        for tmp in data_packet:
+        for tmp in command:
 #        while True:
 #            tmp = self.board.read()
             raw_msg.append(tmp)
@@ -180,7 +290,7 @@ class CmdMessengerThreaded(CmdMessenger, Packetizer):
         
         # Record the time the message arrived
         message_time = time.time()
-        analyze_command(cmd_name, received, message_time)
+        self.analyze_command(cmd_name, received, message_time)
     
     
     def analyze_command(self, cmd_name, msg, message_time):
