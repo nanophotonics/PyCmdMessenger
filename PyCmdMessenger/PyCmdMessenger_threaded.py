@@ -16,10 +16,10 @@ import threading
 
 class CmdMessengerThreaded(CmdMessenger, threading.Thread):
     """
-    Basic interface for interfacing over a serial connection to an arduino 
+    Basic interface for interfacing over a serial connection to an arduino
     using the CmdMessenger library.
     """
-    
+
     def __init__(self,
                  board_instance,
                  commands,
@@ -30,7 +30,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         """
         Input:
             board_instance:
-                instance of ArduinoBoard initialized with correct serial 
+                instance of ArduinoBoard initialized with correct serial
                 connection (points to correct serial with correct baud rate) and
                 correct board parameters (float bytes, etc.)
 
@@ -47,8 +47,8 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
 
             command_separator:
                 character that separates messages (commands) from each other
-                Default: ";" 
-       
+                Default: ";"
+
             escape_separator:
                 escape character to allow separators within messages.
                 Default: "/"
@@ -56,23 +56,79 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
             warnings:
                 warnings for user
                 Default: True
- 
+
             The separators and escape_separator should match what's
             in the arduino code that initializes the CmdMessenger.  The default
-            separator values match the default values as of CmdMessenger 4.0. 
+            separator values match the default values as of CmdMessenger 4.0.
         """
-        super(CmdMessengerThreaded, self).__init__(board_instance, commands, field_separator,
+#        super(CmdMessengerThreaded, self).__init__(board_instance, commands,
+#                                                 field_separator, command_separator,
+#                                                 escape_separator, warnings)
+        CmdMessenger.__init__(self, board_instance, commands, field_separator,
                               command_separator, escape_separator, warnings)
-        self.serial = board_instance
+        threading.Thread.__init__(self)
+
+        self.serial = board_instance.comm
         self.daemon = True
         self.alive = True
-        self._lock = threading.lock()
-        self.buffer = bytearray()
+        self._lock = threading.Lock()
+        self._made_connection = threading.Event()
+        self._buffer = ""
         # start serial reading thread
-        self.run()
-        
-        
+#        self.start()
+
+
+
+
+    def stop(self):
+        self.alive = False
+        if hasattr(self.serial, 'cancel_read'):
+            self.serial.cancel_read()
+        self.join(2)
+
+    def close(self):
+        with self._lock:
+            self.stop()
+            self.serial.close()
+
+    def connect(self):
+        if self.alive:
+            self._made_connection.wait()
+            if not self.alive:
+                raise RuntimeError("lost_connection already called")
+            return (self)
+        else:
+            raise RuntimeError("already stopped")
+
+    def __enter__(self):
+        self.start()
+        self._made_connection.wait()
+        if not self.alive:
+            raise RuntimeError("lost_connection already called")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def made_connection(self, transport):
+        print "connection made by PyCmdMessenger"
+
+
+    def lost_connection(self, exc):
+#        raise IOError("Lost connection to Arduino!")
+        raise exc
+
+
     def run(self):
+        if not hasattr(self.serial, 'cancel_read'):
+            self.serial.timeout = 1
+        try:
+            self.made_connection(self)
+        except Exception as e:
+            self.alive = False
+            self.lost_connection(e)
+            self._made_connection.set()
+            return
         error = None
         while self.alive and self.serial.is_open:
             try:
@@ -81,48 +137,48 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
                 error = e
                 break
             else:
-                if data:
-                    try:
-                        self.received_data(data)
-                    except Exception as e:
-                        error = e
-                        break
+                if data: self.received_data(data)
+
+#                    try:
+#                        self.received_data(data)
+#                    except Exception as e:
+#                        print "failed at position 2"
+#                        error = e
+#                        break
         self.alive = False
         self.lost_connection(error)
-        
-    def stop(self):
-        self.alive = False
-        if hasattr(self.serial, 'cancel_read'):
-            self.serial.cancel_read()
-        self.join(2)
-        
-    def close(self):
-        with self._lock:
-            self.stop()
-            self.serial.close()
-            
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()        
-    
-    def lost_connection(self, exc):
-        raise IOError("Lost connection to Arduino!")
-        raise exc
-    
+
+    def received_data(self, data): #data: string of binary data
+        """Buffer received data, find self.command_separator, call received_command"""
+#        print "reeived_data() called"
+#        print "data:", data
+#        cmd_buffer = bytearray()
+#        cmd_buffer.extend(data)
+        self._buffer+=data
+
+        while self._byte_command_sep in self._buffer:
+            command, self._buffer = self._buffer.split(self._byte_command_sep, 1)
+            if command != "":
+                print command
+#            command = self.buffer[:self.buffer.index(self._byte_command_sep)]
+#            self.buffer = self.buffer[self.buffer.index(self._byte_command_sep)+1:]
+            self.received_command(command)
+
     def write(self, data):
         with self._lock:
-            self.serial.write(data)            
-    
-    
+            self.serial.write(data)
+
+
     def send(self,cmd,*args,**kwargs):
         """
-        Send a command (which may or may not have associated arguments) to an 
+        Send a command (which may or may not have associated arguments) to an
         arduino using the CmdMessage protocol.  The command and any parameters
-        should be passed as direct arguments to send.  
+        should be passed as direct arguments to send.
 
         arg_formats can be passed as a keyword argument. arg_formats is an
         optional string that specifies the formats to use for each argument
         when passed to the arduino. If specified here, arg_formats supercedes
-        formats specified on initialization.  
+        formats specified on initialization.
         """
 
         # Turn the command into an integer.
@@ -137,7 +193,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         if kwargs:
             raise TypeError("'send()' got unexpected keyword arguments: {}".format(', '.join(kwargs.keys())))
 
-        # Figure out what formats to use for each argument.  
+        # Figure out what formats to use for each argument.
         arg_format_list = []
         if arg_formats != None:
 
@@ -152,8 +208,8 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
             except KeyError:
                 # if not, guess for all arguments
                 arg_format_list = ["g" for i in range(len(args))]
-  
-        # Deal with "*" format  
+
+        # Deal with "*" format
         arg_format_list = self._treat_star_format(arg_format_list,args)
 
         if len(args) > 0:
@@ -162,7 +218,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
                 raise ValueError(err)
 
         # Go through each argument and create a bytes representation in the
-        # proper format to send.  Escape appropriate characters. 
+        # proper format to send.  Escape appropriate characters.
         fields = ["{}".format(command_as_int).encode("ascii")]
         for i, a in enumerate(args):
             fields.append(self._send_methods[arg_format_list[i]](a))
@@ -171,28 +227,24 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         # Make something that looks like cmd,field1,field2,field3;
         compiled_bytes = self._byte_field_sep.join(fields) + self._byte_command_sep
 
-        # Send the message. 
+        # Send the message.
         # Only part in this function that has changed to use new thread safe write() function
-        self.write(compiled_bytes)    
-    
-    
-    def received_data(self, data):
-        """Buffer received data, find self.command_separator, call received_command"""
-        self.buffer.extend(data)
-        while self.command_separator in self.buffer:
-            command, self.buffer = self.buffer.split(self.command_separator, 1)
-            self.received_command(command)
-        
-    def received_command(self, command): 
+        self.write(compiled_bytes)
+
+
+    def received_command(self, command, arg_formats=None):
         """
         Basically original receive() method. However, different commands are
         separated by received_data() method already
         """
+#        print "received command:", command
+
         msg = [[]]
         raw_msg = []
         escaped = False
 #        command_sep_found = False
         for tmp in command:
+
 #        while True:
 #            tmp = self.board.read()
             raw_msg.append(tmp)
@@ -223,26 +275,26 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
 #                    command_sep_found = True
 #                    break
 
-                # or any empty characater 
+                # or any empty characater
                 elif tmp == b'':
                     break
 
                 # okay, must be something
                 else:
                     msg[-1].append(tmp)
-  
+
         # No message received given timeouts
         if len(msg) == 1 and len(msg[0]) == 0:
             return None
 
         # Make sure the message terminated properly
 #        if not command_sep_found:
-#          
-#            # empty message (likely from line endings being included) 
-#            joined_raw = b''.join(raw_msg) 
+#
+#            # empty message (likely from line endings being included)
+#            joined_raw = b''.join(raw_msg)
 #            if joined_raw.strip() == b'':
 #                return  None
-#           
+#
 #            err = "Incomplete message ({})".format(joined_raw.decode())
 #            raise EOFError(err)
 
@@ -259,8 +311,8 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
                 cmd_name = "unknown"
                 w = "Recieved unrecognized command ({}).".format(cmd)
                 warnings.warn(w,Warning)
-        
-        # Figure out what formats to use for each argument.  
+
+        # Figure out what formats to use for each argument.
         arg_format_list = []
         if arg_formats != None:
 
@@ -276,27 +328,28 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
                 # if not, guess for all arguments
                 arg_format_list = ["g" for i in range(len(fields[1:]))]
 
-        # Deal with "*" format  
+        # Deal with "*" format
         arg_format_list = self._treat_star_format(arg_format_list,fields[1:])
 
         if len(fields[1:]) > 0:
             if len(arg_format_list) != len(fields[1:]):
                 err = "Number of argument formats must match the number of received arguments."
+                err += " Function causing problem: "+cmd_name
                 raise ValueError(err)
 
         received = []
         for i, f in enumerate(fields[1:]):
             received.append(self._recv_methods[arg_format_list[i]](f))
-        
+
         # Record the time the message arrived
         message_time = time.time()
         self.analyze_command(cmd_name, received, message_time)
-    
-    
+
+
     def analyze_command(self, cmd_name, msg, message_time):
-        raise NotImplementedError("analyze_command needs to be overwritten by subclass!")  
-        
-    
-    
+        raise NotImplementedError("analyze_command needs to be overwritten by subclass!")
+
+
+
 
 
