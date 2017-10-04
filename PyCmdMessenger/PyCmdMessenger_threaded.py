@@ -13,6 +13,7 @@ import warnings, time
 from PyCmdMessenger import CmdMessenger
 #from serial.threaded import Packetizer
 import threading
+import time
 
 class CmdMessengerThreaded(CmdMessenger, threading.Thread):
     """
@@ -73,9 +74,10 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         self.alive = True
         self._lock = threading.Lock()
         self._made_connection = threading.Event()
-        self._buffer = ""
+#        self._buffer = bytearray()
+        self._buffer = []
         # start serial reading thread
-#        self.start()
+        self.start()
 
 
 
@@ -120,6 +122,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
 
 
     def run(self):
+        _buffer = bytearray()
         if not hasattr(self.serial, 'cancel_read'):
             self.serial.timeout = 1
         try:
@@ -132,37 +135,35 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         error = None
         while self.alive and self.serial.is_open:
             try:
-                data = self.serial.read(self.serial.in_waiting or 1)
+#                data = self.serial.read()
+                data = bytearray(self.serial.read(self.serial.in_waiting or 1))
+#                data = bytearray(self.serial.read(self.serial.in_waiting))
             except serial.SerialException as e:
                 error = e
                 break
             else:
-                if data: self.received_data(data)
-
-#                    try:
-#                        self.received_data(data)
-#                    except Exception as e:
-#                        print "failed at position 2"
-#                        error = e
-#                        break
+                if data:
+#                    self.received_data(data)
+                    _buffer.extend(data)
+                    while self._byte_command_sep in _buffer:
+                        command, _buffer = _buffer.split(self._byte_command_sep, 1)
+#                        print "comand as string:",str(command)
+                        self.received_command(str(command))
         self.alive = False
         self.lost_connection(error)
 
     def received_data(self, data): #data: string of binary data
         """Buffer received data, find self.command_separator, call received_command"""
-#        print "reeived_data() called"
-#        print "data:", data
-#        cmd_buffer = bytearray()
-#        cmd_buffer.extend(data)
-        self._buffer+=data
+        self._buffer.append(data)
 
         while self._byte_command_sep in self._buffer:
-            command, self._buffer = self._buffer.split(self._byte_command_sep, 1)
+    #        command, self._buffer = self._buffer.split(self._byte_command_sep, 1)
+            command = self._buffer[:self._buffer.index(self._byte_command_sep)]
+            self._buffer = self._buffer[self._buffer.index(self._byte_command_sep)+1:]
             if command != "":
-                print command
 #            command = self.buffer[:self.buffer.index(self._byte_command_sep)]
 #            self.buffer = self.buffer[self.buffer.index(self._byte_command_sep)+1:]
-            self.received_command(command)
+                self.received_command(command)
 
     def write(self, data):
         with self._lock:
@@ -240,23 +241,34 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
 #        print "received command:", command
 
         msg = [[]]
-        raw_msg = []
+#        raw_msg = []
         escaped = False
 #        command_sep_found = False
+        """
+        At this point the command should contain only one command and no
+        command separator anymore. So the following part only need to
+        separate the individual fields.
+        For this the individual characters (bytes) of the byte string are
+        written into a list, with the different fields are separated by
+        empty list elements like [[],[byte1],[byte2],[],[byte3],..]
+        """
+#        print command
         for tmp in command:
 
 #        while True:
 #            tmp = self.board.read()
-            raw_msg.append(tmp)
+#            raw_msg.append(tmp)
 
             if escaped:
 
                 # Either drop the escape character or, if this wasn't really
                 # an escape, keep previous escape character and new character
                 if tmp in self._escaped_characters:
+                    # append current character without escape character
                     msg[-1].append(tmp)
                     escaped = False
                 else:
+                     # append current character together with escape character
                     msg[-1].append(self._byte_escape_sep)
                     msg[-1].append(tmp)
                     escaped = False
@@ -277,6 +289,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
 
                 # or any empty characater
                 elif tmp == b'':
+                    print "found empty character"
                     break
 
                 # okay, must be something
@@ -285,6 +298,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
 
         # No message received given timeouts
         if len(msg) == 1 and len(msg[0]) == 0:
+            print "no message received"
             return None
 
         # Make sure the message terminated properly
@@ -302,11 +316,12 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         fields = [b''.join(m) for m in msg]
 
         # Get the command name.
-        cmd = fields[0].strip().decode()
+#        cmd = fields[0].strip().decode()
         try:
+            cmd = fields[0].strip().decode()
             cmd_name = self._int_to_cmd_name[int(cmd)]
         except (ValueError,IndexError):
-
+            print "fields:", fields
             if self.give_warnings:
                 cmd_name = "unknown"
                 w = "Recieved unrecognized command ({}).".format(cmd)
@@ -315,7 +330,6 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         # Figure out what formats to use for each argument.
         arg_format_list = []
         if arg_formats != None:
-
             # The user specified formats
             arg_format_list = list(arg_formats)
 
@@ -331,19 +345,22 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         # Deal with "*" format
         arg_format_list = self._treat_star_format(arg_format_list,fields[1:])
 
+        received = []
         if len(fields[1:]) > 0:
             if len(arg_format_list) != len(fields[1:]):
                 err = "Number of argument formats must match the number of received arguments."
                 err += " Function causing problem: "+cmd_name
-                raise ValueError(err)
+                print err
+                print " message causing probelm: "
+                print msg
+#                raise ValueError(err)
+            else:
+                for i, f in enumerate(fields[1:]):
+                    received.append(self._recv_methods[arg_format_list[i]](f))
 
-        received = []
-        for i, f in enumerate(fields[1:]):
-            received.append(self._recv_methods[arg_format_list[i]](f))
-
-        # Record the time the message arrived
-        message_time = time.time()
-        self.analyze_command(cmd_name, received, message_time)
+                # Record the time the message arrived
+                message_time = time.time()
+                self.analyze_command(cmd_name, received, message_time)
 
 
     def analyze_command(self, cmd_name, msg, message_time):
