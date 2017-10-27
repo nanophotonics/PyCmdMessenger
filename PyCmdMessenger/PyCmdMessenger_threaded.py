@@ -11,6 +11,7 @@ __date__ = "2017-09-25"
 
 import warnings, time
 import numpy as np
+import struct
 from PyCmdMessenger import CmdMessenger
 from PyCRC.CRCCCITT import CRCCCITT as CRC
 #from serial.threaded import Packetizer
@@ -76,7 +77,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         self._lock = threading.Lock()
         self._made_connection = threading.Event()
         self._buffer = []
-        
+        self._num_bytes_check_value = 2
         self._num_bytes = {"c":1,
                            "b":1,
                            "i":self.board.int_bytes,
@@ -134,10 +135,11 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         raise exc
 
 
-    def run(self):
+    def run(self, arg_formats=None):
         num_cmd_rec=0
         num_corr_cmd=0
         _buffer = bytearray()
+        prev_command = []
         if not hasattr(self.serial, 'cancel_read'):
             self.serial.timeout = 1
         try:
@@ -147,58 +149,238 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
             self.lost_connection(e)
             self._made_connection.set()
             return
+        
         error = None
+        msg = [[]]
+        raw_msg = []
+        escaped = False  
+        command_sep_found = False 
+        
         while self.alive and self.serial.is_open:
-            try:
-                data = bytearray(self.serial.read(self.serial.in_waiting or 1))
-            except serial.SerialException as e:
-                error = e
-                break
-            else:
-                if data:
-                    _buffer.extend(data)
-                    while self._byte_command_sep in _buffer:
-                        num_cmd_rec+=1
-                        command, _buffer = _buffer.split(self._byte_command_sep, 1)
 
-#                        print "command as list:", list(command)
-                        command_hex=[hex(x) for x in command]
-#                        print "command as hex list:",command_hex
-#                        print "command as received:",str(command)
- 
-                        # find field separators and split fields into different elements of a list
-                        fields = []
-                        while self._byte_field_sep in command: # the check value is not appended
-                            field, command = command.split(self._byte_field_sep, 1)
-                            fields.append(field)
-#                        print "fields:",fields     
-                        try:
-                            fields[0]=bytearray([np.uint8(str(fields[0]))])
-                        except ValueError:
-                            continue
+            tmp = self.serial.read(1)
+            if tmp != "":    
+                raw_msg.append(tmp)
+        
+                if escaped:        
+                    # Either drop the escape character or, if this wasn't really
+                    # an escape, keep previous escape character and new character
+                    if tmp in self._escaped_characters:
+                        msg[-1].append(tmp)
+                        escaped = False
+                    else:
+                        msg[-1].append(self._byte_escape_sep)
+                        msg[-1].append(tmp)
+                        escaped = False
+                else:
+                    # look for escape character
+                    if tmp == self._byte_escape_sep:
+                        escaped = True        
+                    # or field separator
+                    elif tmp == self._byte_field_sep:
+                        msg.append([])        
+                    # or command separator
+                    elif tmp == self._byte_command_sep:
+                        command_sep_found = True
+                    # okay, must be something
+                    else:
+                        msg[-1].append(tmp)                    
+            
+            if command_sep_found:                        
+                command_sep_found = False 
+                raw_command = msg
+                
+                # Turn message into fields (excluding crc value at the end)
+                rec_crc_value = b''.join(msg[-1])
+                fields = [b''.join(m) for m in msg[:-1]]
+                msg=[[]]
+                        
+                # Get the command name.
+                cmd = fields[0].strip().decode()
+                try:
+                    cmd_name = self._int_to_cmd_name[int(cmd)]
+                except (ValueError,IndexError):
+                    if self.give_warnings:
+                        cmd_name = "unknown"
+                        w = "Recieved unrecognized command ({}).".format(cmd)
+                        warnings.warn(w,Warning)                            
                             
-                        # calculate CRC check value
-#                        crc = CRC(version='FFFF').calculate(self._byte_field_sep.join(fields))
-                        crc = CRC(version='XModem').calculate(self._byte_field_sep.join(fields))
+                # Figure out what formats to use for each argument.  
+                arg_format_list = []
+                if arg_formats != None:
+                    # The user specified formats
+                    arg_format_list = list(arg_formats)                        
+                else:
+                    try:
+                        # See if class was initialized with a format for arguments to this
+                        # command
+                        arg_format_list = self._cmd_name_to_format[cmd_name]
+                    except KeyError:
+                        # if not, guess for all arguments
+                        arg_format_list = ["g" for i in range(len(fields[1:-2]))]
                         
-                        # convert list of field bytearray to list of hex strings
-#                        fields = [str(field) for field in fields]
-#                        print "calculated CRC value:", hex(crc)
-#                        print "check value received:", hex(int(command))
-
-                        # replace first field that contains function by string                        
-#                        fields[0]=str(ord(fields[0]))
+                # Deal with "*" format  
+                arg_format_list = self._treat_star_format(arg_format_list,fields[1:-2])
+                
+#                print "fields:", fields
+#                print "command name:", cmd_name
+                
+                # check correct length of command
+                if len(fields[1:]) > 0:
+                    if len(arg_format_list) != len(fields[1:]): 
+                        print "fields:", fields
+                        print "previous command:", prev_command
+                        err = "Number of argument formats must match the number of received arguments."
+                        raise ValueError(err)              
+                
+                # get a byte value from 1-3 ASCII characters encoding the
+                # command number to calculate the correct check value
+                try:
+                    fields[0] = bytearray([np.uint8(str(fields[0]))])
+                except:
+                    print "problem transforming command number to byte value. command:", fields[0]
+                                          
+                # calculate CRC check value
+                crc = CRC(version='XModem').calculate(self._byte_field_sep.join(fields))
+                calc_crc_2bytes = struct.pack("<H", crc)
+                
+#                print "calculated crc value: _{}_".format(calc_crc_2bytes)
+#                print "calculated crc value string: _{}_".format(str(calc_crc_2bytes))
                         
-                        if str(crc) != str(command):
-                            num_corr_cmd+=1
-                            self.corrupted_cmds=num_corr_cmd/float(num_cmd_rec)
-#                            print "received corrupted commands", num_corr_cmd
-#                            print "percentage of corrupted commands:",self.corrupted_cmds
-                        else:
-#                            try:   
-                            self.received_command(fields)
+               # compare received and calculated CRC value
+                if calc_crc_2bytes != rec_crc_value:
+                    if (calc_crc_2bytes != arguments):
+                        num_corr_cmd+=1
+                        self.corrupted_cmds=num_corr_cmd/float(num_cmd_rec)
+                        print "received corrupted commands", num_corr_cmd
+                        print "raw command:", raw_command                   
+                        print "calculated crc as 2 bytes: _{}_".format(calc_crc_2bytes)
+                        print "calculated crc hex:", hex(crc)
+                        print "percentage of corrupted commands:",self.corrupted_cmds
+                else: 
+                    received = []
+                    for i, f in enumerate(fields[1:]):
+                        received.append(self._recv_methods[arg_format_list[i]](f)) 
+                    # Record the time the message arrived
+                    message_time = time.time()
+                    prev_command = fields
+                    self.response_to_command(cmd_name, received, message_time)
+                    
+                                               
+#                         check that comand has the correct length for the
+#                         received command number and one byte of a binary
+#                         argument was not accidently identified as command_sep
+#                        arguments = []
+#                        if len(command) != 0:
+#                            try:
+#                                cmd_ASCII, arguments = command.split(self._byte_field_sep, 1)
 #                            except:
-#                                print "fields:", fields
+#                                print "command cannot be split into command number and arguments"
+#                                print "raw command:", command
+#                                print "buffer:", _buffer
+#                                print "previous command:", prev_command
+#                            
+#                            try:
+#                                # Get the command name  
+#                                cmd = str(cmd_ASCII).strip().decode()
+#                                cmd_name = self._int_to_cmd_name[int(cmd)]
+#                            except (ValueError,IndexError):
+#                                if self.give_warnings:
+#                                    print "command number not recognized"
+#                                    print "raw command:", command
+#                                    print "previous command:", prev_command
+#                                    cmd_name = "unknown"
+#                                    w = "Unrecognized command or bit error!"
+#                                    warnings.warn(w,Warning)    
+#                                 
+#                            # Figure out format and length of received command.
+#                            arg_format_list = []
+#                            if arg_formats != None:
+#                                # The user specified formats
+#                                arg_format_list = list(arg_formats)
+#                            else:
+#                                try:
+#                                    # See if class was initialized with a format 
+#                                    # for arguments to this command
+#                                    arg_format_list = self._cmd_name_to_format[cmd_name]
+#                                except KeyError:
+#                                    print "problem with argument format for command", cmd_name
+#                                    print "raw command:", command
+#                                    print "previous command:", prev_command
+                                    
+                            
+#                            expected_bytes = self._num_bytes_check_value
+#                            expected_bytes += len(arg_format_list)-1  # one additional byte for each field separator
+#                            for c in arg_format_list:
+#                                expected_bytes += self._num_bytes[c]
+                                
+#                            # check that received command has the correct length, otherwise add bytes from buffer
+#                            while len(arguments) < expected_bytes:
+#    #                            print "received command is too short!"
+#    #                            print "raw command:", command
+#    #                            print "previous command:", prev_command
+#                                # check if there is another command separator in _buffer
+#                                sep_pos = _buffer.find(self._byte_command_sep)
+#                                if sep_pos == -1:  # no command separator
+#    #                                print "no command separator found in buffer, so update buffer"
+#                                    # wait until remaining parts of commands have arrived
+#                                    while self.command_separator not in _buffer:
+#                                        _buffer.extend(bytearray(self.serial.read(self.serial.in_waiting or 1)))
+#                                    sep_pos = _buffer.find(self._byte_command_sep)
+#    #                                print "new buffer:", _buffer
+#                                
+#                                arguments.extend(self.command_separator) # byte missinterpreted as command separator                                                            
+#                                if sep_pos == 0:
+#                                    del _buffer[0]
+#                                
+#                                elif sep_pos <= (expected_bytes-len(arguments)): # check that new bytes are the missing ones
+#                                    remaining_cmd, _buffer = _buffer.split(self._byte_command_sep, 1)
+#                                    arguments.extend(remaining_cmd)
+##                                    print "new arguments:", arguments
+#                                
+#                                elif sep_pos > (expected_bytes-len(arguments)):
+#                                    print "expected_bytes", expected_bytes
+#                                    print "len(arguments)", len(arguments)
+#                                    
+#                                    print "raw command:", command
+#                                    print "previous command:", prev_command
+#                                    print "following arugments too long!"
+#                                    print _buffer[:sep_pos] 
+                            
+#                           
+#                                received = []
+#                                if len(fields[1:]) > 0:
+#                                    # check that number of arguments in received command is same as
+#                                    # number of arguments expected for command number
+#                                    if len(arg_format_list) < len(fields[1:]): 
+#                                        # one byte in binary argument misinterpreted as field separator, 
+#                                        # because total number of bytes in command was verified before
+#                                        # so go through argument format list ..
+#                                        for i,c in enumerate(arg_format_list):
+#                                            if len(fields[i+1])<self._num_bytes[c]:
+#                                                fields[i+1]=self._byte_field_sep.join(fields[i+1:i+2])
+#    #                                            print "binaray argument misinterpreted as field separator"
+#    
+#                                    elif len(arg_format_list) > len(fields[1:]):  
+#                                        err = "Number of argument formats must match the number of received arguments."
+#                                        err += " Function causing problem: "+cmd_name
+#                                        print err
+#                                        print " message causing probelm: "
+#                                        print fields
+#                                        print "preceeding command:", prev_command
+#                                        raise ValueError(err)
+#                                    else:
+#                        #                print "fields as string:",fields
+#                                        # convert argument list of bytearray to list of hex string
+#                                        for i, f in enumerate(fields[1:]):
+#                                            received.append(self._recv_methods[arg_format_list[i]](str(f)))
+#                                     
+#                                        # Record the time the message arrived
+#                                        message_time = time.time()
+#                                        prev_command = command
+#                                        self.response_to_command(cmd_name, received, message_time)
+#                            
+                           
         self.alive = False
         self.lost_connection(error)
         
@@ -206,7 +388,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
     def received_command(self, fields, arg_formats=None):
         """
         Basically original receive() method. However, different commands are
-        separated by received_data() method already
+        separated by run() method already
         param fields: list of bytearrays containing the command number and arguments
         """
         
@@ -216,10 +398,10 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
             cmd = str(fields[0]).strip().decode()
             cmd_name = self._int_to_cmd_name[int(cmd)]
         except (ValueError,IndexError):
-            print "fields:", fields
             if self.give_warnings:
                 cmd_name = "unknown"
                 w = "Recieved unrecognized command ({}).".format(cmd)
+                w += " Recieved fields: ({})".format(fields)
                 warnings.warn(w,Warning)
 #        print "fields:", fields
         
