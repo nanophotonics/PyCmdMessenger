@@ -22,6 +22,7 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
     Basic interface for interfacing over a serial connection to an arduino
     using the CmdMessenger library.
     """
+    commands=[[]]
 
     def __init__(self,
                  board_instance,
@@ -93,6 +94,11 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
         # start serial reading thread
         self._byte_field_sep=bytearray(self._byte_field_sep)
         self.corrupted_cmds=0.00 # percentage of received commands that are corrupted
+
+        # generate class factions for all Arduino commands
+        for command in self.commands:
+            setattr(self,command[0],self.generate_function(command[0]))
+
         self.start()
 
 
@@ -411,6 +417,11 @@ class CmdMessengerThreaded(CmdMessenger, threading.Thread):
 
 
     
+    # generates class functions for Arduino commands
+    def generate_function(self,command_name):
+        def function(*args,**kwargs):
+            return self.send(command_name,*args,**kwargs)
+        return function
 
 
 
